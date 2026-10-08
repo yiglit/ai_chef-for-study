@@ -1,6 +1,6 @@
 # 🍳 AI 私厨（Personal Chef）
 
-一个基于 **FastAPI** + **LangGraph** 的个人 AI 大厨助手。用户上传食材图片或输入文字描述，AI 大厨会解析食材、检索本地菜谱知识库（RAG）、必要时联网搜索，并推荐多道菜品及制作流程。
+一个基于 **FastAPI** + **LangChain** 的个人 AI 大厨助手。用户上传食材图片或输入文字描述，AI 大厨会解析食材、检索本地菜谱知识库（RAG）、必要时联网搜索，并推荐多道菜品及制作流程。
 
 > 学习向项目：用于探索 LangChain / LangGraph Agent、Agentic RAG 的开发与部署流程。
 
@@ -46,7 +46,6 @@ ai_chef/
 │   ├── main.py               # FastAPI 入口：CORS、路由挂载、静态资源与 SPA fallback
 │   ├── agents/
 │   │   ├── personal_chef.py  # AI 大厨 Agent：模型初始化、工具、记忆、流式生成
-│   │   └── Nutrition_ans.py  # 学习用示例：MCP 客户端 Demo（未接入主流程）
 │   ├── api/
 │   │   └── v1/
 │   │       ├── chat.py       # 对话接口（流式 / 历史查询 / 清空）
