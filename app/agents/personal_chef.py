@@ -7,7 +7,7 @@ import os
 import sqlite3
 from langchain.agents import create_agent, middleware
 from langchain.tools import tool
-from app.RAG.HyDE import rag_search
+from app.RAG.rewrite import rag_search
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langchain.agents.middleware import SummarizationMiddleware
 # 加载环境变量

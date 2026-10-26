@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 from app.models.schemas import ChatRequest
-from app.agents.personal_chef import search_recipes,clear_messages,getmessages
+from app.agents.graph_chef import search_recipes,clear_messages,getmessages
 from fastapi.responses import StreamingResponse
 router = APIRouter()
 
@@ -8,7 +8,7 @@ router = APIRouter()
 @router.post("/chat/stream")
 async def chat_endpoint(request: ChatRequest):
     """流式对话"""
-    return StreamingResponse(search_recipes(request.message,request.image_url,request.thread_id),
+    return StreamingResponse(search_recipes(request.message,request.image_url,request.thread_id,request.user_id),
                              media_type="text/event-stream")
 
 

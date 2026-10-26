@@ -3,8 +3,11 @@ import os
 from dotenv import load_dotenv
 from langchain_core.messages import SystemMessage,HumanMessage
 from app.common.logger import logger
+from langchain_core.documents import Document
 from app.RAG.vector_store import get_vector_store
+from sentence_transformers import CrossEncoder
 load_dotenv()
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 _model = None
 def get_model():
     global _model
@@ -13,7 +16,15 @@ def get_model():
                             model_provider="openai",
                             api_key=os.getenv("DEEPSEEK_API_KEY"),
                             base_url=os.getenv("DEEPSEEK_BASE_URL"))
+    else:
+        model=_model
     return model
+_cross_encoder = None
+def get_cross_encoder():
+    global _cross_encoder
+    if _cross_encoder is None:
+        _cross_encoder = CrossEncoder("BAAI/bge-reranker-v2-m3")
+    return _cross_encoder
 def rewrite_query(query:str)->dict:
     try:
         model=get_model()
@@ -41,7 +52,7 @@ def rewrite_query(query:str)->dict:
         logger.error("问题改写失败")
         return {"original": query, "rewritten_query": query, "keywords": query}
 #向量召回，语义检索
-def vector_call(query:str,top_k:int=3)->list:
+def vector_call(query:str,top_k:int=10)->list:
     try:
         collection=get_vector_store()
         results=collection.similarity_search(
@@ -50,20 +61,35 @@ def vector_call(query:str,top_k:int=3)->list:
             ranker_type="rrf",
             ranker_params={"k":60}
             )
+        logger.info(f"向量召回成功，results:{results}")
         if not results:
+            logger.warning("向量召回结果为空")
             return []
-        recipes=[]
-        for i in results:
-            recipes.append(i.page_content)
-        logger.info(f"向量召回{len(recipes)}")
-        return recipes
+        logger.info(f"向量召回{len(results)}条")
+        return results
+
     except Exception as e:
         logger.error(f"向量召回失败")
         return []
-def rag_search(query:str,top_k:int=3):
+def re_rank(query:str,docs:list[Document],top_n:int=3)->list:
+    if not docs:
+        return []
+    try:
+        cross_encoder=get_cross_encoder()
+        content=[i.page_content for i in docs]
+        scores=cross_encoder.predict([(query,t)for t in content])
+        for doc,score in zip(docs,scores):
+            doc.metadata["score"]=round(score,4)
+        docs_sorted=sorted(docs,key=lambda d:d.metadata.get("score",0),reverse=True)
+        logger.info(f"crossencode rerank完成，返回{min(top_n,len(docs_sorted))}条")
+        return docs_sorted[:top_n]
+    except Exception as e:
+        logger.warning("rerank失败")
+        return []
+def rag_search(query:str,top_k:int=10,top_n:int=3)->list:
     query_info=rewrite_query(query)
     vectorize=vector_call(query_info["rewritten_query"],top_k)
-    return vectorize
-"""text=rag_search("豆腐")
-for i,content in enumerate(text):
-    print(f"第{i+1}道推荐\n{content}")"""
+    if not vectorize:
+        return []
+    reranked=re_rank(query,vectorize,top_n)
+    return reranked

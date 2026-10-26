@@ -7,3 +7,4 @@ class ChatRequest(BaseModel):
     message: str
     image_url: Optional[str] = None
     thread_id: str
+    user_id: str

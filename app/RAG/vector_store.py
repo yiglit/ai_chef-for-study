@@ -33,7 +33,8 @@ def load_recipes(file_path: str):
             f"食材：{', '.join(recipe['ingredients'])}\n"
             f"标签：{', '.join(recipe['tags'])}\n"
             f"步骤：{recipe['steps']}\n"
-            f"简介：{recipe['description']}")
+            f"简介：{recipe['description']}\n"
+            f"营养：{str(recipe['nutrition_per_serving'])}")
         documents.append(
             Document(
                 page_content=content,
@@ -41,6 +42,7 @@ def load_recipes(file_path: str):
                     "id": recipe["id"],
                     "name": recipe["name"],
                     "cuisine": recipe["cuisine"],
+                    "cooking_time": recipe["cooking_time"],
                     "tags": ",".join(recipe["tags"]),
                     "ingredients":",".join(recipe["ingredients"])
                 }
@@ -50,25 +52,7 @@ def load_recipes(file_path: str):
 """docs = load_recipes("./resource/菜谱.json")
 vector_stores=get_vector_store()
 vector_stores.add_documents(docs[1],ids=docs[0])
-print(docs)
-query="鸡肉"
-result=vector_stores.similarity_search_with_score(
-    query,
-    k=3,
-    ranker_type="rrf",
-    ranker_params={"k":60}
-)"""
-"""vectorstore.similarity_search(
-    "What is CoT?",
-    k=1,
-    expr="source == 'https://lilianweng.github.io/posts/2023-06-23-agent/'",
-)
-
-# The same as:
-# vectorstore.as_retriever(search_kwargs=dict(
-#     k=1,
-#     expr="source == 'https://lilianweng.github.io/posts/2023-06-23-agent/'",
-# )).invoke("What is CoT?")"""
+print(docs)"""
 def reset_vector():
     try:
         vector_store=get_vector_store()
