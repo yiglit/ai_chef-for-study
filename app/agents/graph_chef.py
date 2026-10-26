@@ -19,7 +19,10 @@ from app.common.logger import logger
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.store.sqlite import SqliteStore
 import sqlite3
+import asyncio
+import threading
 from langgraph.runtime import Runtime
+from langgraph.types import StreamWriter
 from pydantic import BaseModel
 load_dotenv()
 
@@ -185,12 +188,19 @@ search_tool=TavilySearch(
     max_results=3,
     topic="general"
 )
-
-checkpoint_connect=sqlite3.connect("app/db/personal_chef.db",check_same_thread=False)
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DB_DIR = os.path.join(BASE_DIR, "app", "db")
+checkpoint_path = os.path.join(DB_DIR, "personal_chef.db")
+store_path = os.path.join(DB_DIR, "store.db")
+checkpoint_connect=sqlite3.connect(checkpoint_path,check_same_thread=False)
 checkpoint=SqliteSaver(checkpoint_connect)
 checkpoint.setup()
 
-store_connect=sqlite3.connect("app/db/personal_chef.db",check_same_thread=False)
+# SqliteStore 内部显式执行 BEGIN/COMMIT，连接必须使用 autocommit（isolation_level=None），
+# 否则 setup() 里的 INSERT 会遗留隐式事务，导致下一次 BEGIN 报 "cannot start a transaction within a transaction"
+store_connect=sqlite3.connect(store_path,check_same_thread=False,isolation_level=None)
+store_connect.execute("PRAGMA journal_mode=WAL")
+store_connect.execute("PRAGMA busy_timeout=5000")
 store=SqliteStore(store_connect,
                   index=SqliteIndexConfig(
                       embed=get_embeddings(),
@@ -262,7 +272,7 @@ def detect_intent(state:agentstate):
             return {"intent": "nutrition"}
     return {"intent": "general"}
 manager=create_memory_store_manager(
-    model=LLM,
+    LLM,
     schemas=[UserPreference],
     namespace=("memories","{user_id}")
 )
@@ -270,29 +280,71 @@ executer=ReflectionExecutor(manager,store=store)
 general_llm = None
 nutrition_llm = None
 
-def general_llm_node(state:agentstate,config):
+def general_llm_node(state:agentstate,config,writer:StreamWriter):
     global general_llm
     if general_llm is None:
         general_llm=run_agent(tools=[web_search,similarity_search],System_prompt=SYSTEM_PROMPTS["general"])
     user_id=config["configurable"]["user_id"]
     user_message=state["messages"][-1].content
+    if not isinstance(user_message,str):
+        user_message=str(user_message)
     memories=store.search(("memories",user_id),query=user_message,limit=5)
-    memory_text="\n".join(m.value.get("context") for m in memories)
-    response = general_llm.invoke(state["messages"]+[HumanMessage(memory_text)])
+    memory_text="\n".join(
+        m.value.get("context") for m in memories
+        if isinstance(m.value,dict) and m.value.get("context")
+    )
+    messages=list(state["messages"])
+    if memory_text:
+        messages.append(HumanMessage(memory_text))
+    # 内部 agent 是 LangGraph 图，输入必须是 state 字典
+    # 流式转发其中的 token，同时用最后一个 values 事件拿到最终消息写回外层图
+    final_state=None
+    for mode,data in general_llm.stream(
+        {"messages":messages},
+        config={"recursion_limit":10},
+        stream_mode=["messages","values"],
+    ):
+        if mode=="messages":
+            chunk,_metadata=data
+            if isinstance(chunk,AIMessageChunk) and chunk.content:
+                writer(chunk.content)
+        elif mode=="values":
+            final_state=data
+    response=final_state["messages"][-1]
     to_process={"messages":state["messages"]+[response]}
     executer.submit(to_process,
                     after_seconds=1800,
                     config={"configurable":{"user_id":user_id}})
     return {"messages": [response]}
-def nutrition_node(state:agentstate,config):
+def nutrition_node(state:agentstate,config,writer:StreamWriter):
     global nutrition_llm
     if nutrition_llm is None:
         nutrition_llm=run_agent(tools=[web_search,calculate_nutrition],System_prompt=SYSTEM_PROMPTS["nutrition"])
     user_id=config["configurable"]["user_id"]
     user_message=state["messages"][-1].content
+    if not isinstance(user_message,str):
+        user_message=str(user_message)
     memories=store.search(("memories",user_id),query=user_message,limit=5)
-    memory_text="\n".join(m.value.get("context") for m in memories)
-    response = nutrition_llm.invoke(state["messages"]+[HumanMessage(memory_text)])
+    memory_text="\n".join(
+        m.value.get("context") for m in memories
+        if isinstance(m.value,dict) and m.value.get("context")
+    )
+    messages=list(state["messages"])
+    if memory_text:
+        messages.append(HumanMessage(memory_text))
+    final_state=None
+    for mode,data in nutrition_llm.stream(
+        {"messages":messages},
+        config={"recursion_limit":10},
+        stream_mode=["messages","values"],
+    ):
+        if mode=="messages":
+            chunk,_metadata=data
+            if isinstance(chunk,AIMessageChunk) and chunk.content:
+                writer(chunk.content)
+        elif mode=="values":
+            final_state=data
+    response=final_state["messages"][-1]
     to_process={"messages":state["messages"]+[response]}
     executer.submit(to_process,
                     after_seconds=1800,
@@ -330,8 +382,8 @@ builder.add_node("nutrition",nutrition_node)
 builder.add_node("detect_intent",detect_intent)
 builder.add_edge(START,"detect_intent")
 builder.add_conditional_edges("detect_intent",lambda state:state["intent"],{"general": "general", "nutrition": "nutrition"})
-builder.add_edge("general","END")
-builder.add_edge("nutrition","END")
+builder.add_edge("general",END)
+builder.add_edge("nutrition",END)
 graph=builder.compile(checkpointer=checkpoint,store=store)
 config = {"configurable": {"thread_id": "user-1"}}
 # 第一轮
@@ -360,15 +412,30 @@ async def search_recipes(prompt:str,image:str,thread_id:str,user_id:str):
         ])
     else:
         message=HumanMessage(content=prompt)
-    for chunk,metadata in graph.stream(
-    {"messages":[message]},
-        config,
-        stream_mode="messages",
-    ):
-        if metadata.get("langgraph_node") not in ("general", "nutrition"):
-            continue
-        if isinstance(chunk,AIMessageChunk) and chunk.content:
-            yield chunk.content
+    # SqliteSaver 不支持 astream，因此把同步 graph.stream 放到工作线程执行，
+    # 再通过队列把 token 交回事件循环，避免阻塞整个 ASGI 事件循环
+    queue:asyncio.Queue=asyncio.Queue()
+    loop=asyncio.get_running_loop()
+    end=object()
+
+    def _produce():
+        try:
+            for chunk in graph.stream({"messages":[message]},config,stream_mode="custom"):
+                loop.call_soon_threadsafe(queue.put_nowait,chunk)
+        except Exception as e:
+            loop.call_soon_threadsafe(queue.put_nowait,e)
+            logger.error(f"[流式对话失败] {e}")
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait,end)
+
+    threading.Thread(target=_produce,daemon=True).start()
+    while True:
+        item=await queue.get()
+        if item is end:
+            break
+        if isinstance(item,Exception):
+            raise item
+        yield item
 def clear_messages(thread_id:str):
     logger.info(f"清空历史消息，对话:{thread_id}")
     checkpoint.delete_thread(thread_id)
