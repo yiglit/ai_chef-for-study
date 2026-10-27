@@ -219,7 +219,8 @@ SYSTEM_PROMPTS = {
 营养成分分析报告
 - 各食材营养明细表格
 - 营养汇总（总卡路里/蛋白质/脂肪/碳水/纤维）
-- 营养建议（是否均衡、健康提示）""",
+- 营养建议（是否均衡、健康提示）
+""",
 
 "general": """
 你是一名私人厨师。收到用户提供的食材照片或清单后，请按以下流程操作：
@@ -228,6 +229,7 @@ SYSTEM_PROMPTS = {
 3.多维度评估与排序：从营养价值和制作难度两个维度对检索到的候选食谱进行量化打分，并根据得分排序，制作简单且营养丰富的排名靠前。
 4.结构化方案输出：把排序后的食谱整理为一份结构清晰的建议报告，要包含食谱信息、得分、推荐理由、食谱的参考图片，帮助用户快速做出决策。本地知识库中的食谱要被优先推荐。参考图片要给出连接，本地知识库的菜谱若没有连接可以输出无。
 请严格按照流程，优先调用similarity_search工具检索本地知识库的菜谱，如果知识库检索出来的菜谱与用户提供的食材关联不大或菜谱数量不足再调用 web_search 工具搜索食谱，搜索不到的情况下才能自己发挥。
+特别提醒：如果用户的问题跟食谱没有啥关系或者关系不大你就是一个正常的聊天机器人，正常回答用户的问题就行了优先调用web_search工具进行回答，没有理想答案再自己发挥。
 """
 }
 tools=[similarity_search,web_search]
@@ -242,16 +244,6 @@ def run_agent(tools:list,System_prompt:str):
         store=store,
     )
     return inner_agent
-"""def tool_node(state:messages_agentstate):
-    message=state["messages"][-1]
-    messages=[]
-    for tool_call in message.tool_calls:
-        _name=tool_call["name"]
-        _args=tool_call["args"]
-        _id=tool_call["id"]
-        result=tools_by_name[_name].invoke(_args)
-        messages.append(ToolMessage(content=result,tool_call_id=_id))
-    return {"messages":messages}"""
 
 class UserPreference(BaseModel):
     context:str
@@ -279,7 +271,6 @@ manager=create_memory_store_manager(
 executer=ReflectionExecutor(manager,store=store)
 general_llm = None
 nutrition_llm = None
-
 def general_llm_node(state:agentstate,config,writer:StreamWriter):
     global general_llm
     if general_llm is None:
@@ -296,6 +287,8 @@ def general_llm_node(state:agentstate,config,writer:StreamWriter):
     messages=list(state["messages"])
     if memory_text:
         messages.append(HumanMessage(memory_text))
+    if state.get("summary"):
+        messages.append(SystemMessage("以下是历史信息的摘要:" + state["summary"]))
     # 内部 agent 是 LangGraph 图，输入必须是 state 字典
     # 流式转发其中的 token，同时用最后一个 values 事件拿到最终消息写回外层图
     final_state=None
@@ -311,10 +304,11 @@ def general_llm_node(state:agentstate,config,writer:StreamWriter):
         elif mode=="values":
             final_state=data
     response=final_state["messages"][-1]
-    to_process={"messages":state["messages"]+[response]}
-    executer.submit(to_process,
-                    after_seconds=1800,
-                    config={"configurable":{"user_id":user_id}})
+    to_process={"messages":[state["messages"][-1]]+[response]}
+    if to_process["messages"]:
+        executer.submit(to_process,
+                        after_seconds=0,
+                        config={"configurable":{"user_id":user_id}})
     return {"messages": [response]}
 def nutrition_node(state:agentstate,config,writer:StreamWriter):
     global nutrition_llm
@@ -332,6 +326,8 @@ def nutrition_node(state:agentstate,config,writer:StreamWriter):
     messages=list(state["messages"])
     if memory_text:
         messages.append(HumanMessage(memory_text))
+    if state.get("summary"):
+        messages.append(SystemMessage("以下是历史信息的摘要:"+state["summary"]))
     final_state=None
     for mode,data in nutrition_llm.stream(
         {"messages":messages},
@@ -345,60 +341,51 @@ def nutrition_node(state:agentstate,config,writer:StreamWriter):
         elif mode=="values":
             final_state=data
     response=final_state["messages"][-1]
-    to_process={"messages":state["messages"]+[response]}
-    executer.submit(to_process,
-                    after_seconds=1800,
-                    config={"configurable":{"user_id":user_id}})
+    to_process={"messages":[state["messages"][-1]]+[response]}
+    if to_process["messages"]:
+        executer.submit(to_process,
+                        after_seconds=0,
+                        config={"configurable": {"user_id": user_id}})
     return {"messages": [response]}
-"""def summarize_node(state: agentstate):
+def summarize_node(state: agentstate):
     messages = state["messages"]
-    keep_last_n = 2
+    keep_last_n = 4
     to_summarize = messages[:-keep_last_n] if len(messages) > keep_last_n else []
     if not to_summarize:
         return {}
+    prev_summary=state.get("summary","") or ""
     summary_prompt = "请简要总结以下对话，保留关键信息和事实：\n\n"
+    if prev_summary:
+        summary_prompt += f"【已有历史摘要，请合并更新，不要丢失其中的事实】：\n{prev_summary}\n\n"
+    summary_prompt += "【新增对话】：\n"
     for msg in to_summarize:
         role = "用户" if isinstance(msg, HumanMessage) else "助手"
         summary_prompt += f"{role}: {msg.content}\n"
     summary_response = LLM.invoke([SystemMessage(content=summary_prompt)])
     # 用 RemoveMessage 删除所有被压缩的旧消息
-    removals = [RemoveMessage(id=msg.id) for msg in to_summarize]
+    removals = [RemoveMessage(id=msg.id) for msg in to_summarize if msg.id]
     # 返回更新：新的摘要 + 要删除的消息列表
     return {
         "summary": summary_response.content,
         "messages": removals,  # add_messages reducer 会处理这个删除操作
-    }"""
-
-"""def should_continue(state:messages_agentstate):
-    last_message=state["messages"][-1]
-    if hasattr(last_message,"tool_calls") and last_message.tool_calls:
-        return "tool_call"
+    }
+def summarize_route(state:agentstate):
+    messages = state["messages"]
+    if len(messages)>20:
+        return "summarize_node"
     else:
-        return END"""
-
+        return END
 builder=StateGraph(agentstate)
 builder.add_node("general",general_llm_node)
 builder.add_node("nutrition",nutrition_node)
 builder.add_node("detect_intent",detect_intent)
+builder.add_node("summarize_node",summarize_node)
 builder.add_edge(START,"detect_intent")
 builder.add_conditional_edges("detect_intent",lambda state:state["intent"],{"general": "general", "nutrition": "nutrition"})
-builder.add_edge("general",END)
-builder.add_edge("nutrition",END)
+builder.add_conditional_edges("general",summarize_route)
+builder.add_conditional_edges("nutrition",summarize_route)
 graph=builder.compile(checkpointer=checkpoint,store=store)
-config = {"configurable": {"thread_id": "user-1"}}
 # 第一轮
-"""for chunk in graph.stream(
-        {"messages":[HumanMessage("你好我是虎哥")]},
-        config,
-        stream_mode="values"
-):
-    print(chunk["messages"])
-# 第二轮（同一个 thread_id，即可读取历史）
-stream2 = graph.stream_events(
-    {"messages": [HumanMessage("我是谁")]},
-    config,  # 相同 thread_id
-    version="v3"
-)"""
 async def search_recipes(prompt:str,image:str,thread_id:str,user_id:str):
     config = {"configurable":
                 {"thread_id": thread_id,
@@ -458,4 +445,21 @@ def getmessages(thread_id:str)->list[dict[str, str]]:
         if isinstance(msg,HumanMessage):
             result.append({"role":"user","content":msg.content})
     return result
+"""def tool_node(state:messages_agentstate):
+    message=state["messages"][-1]
+    messages=[]
+    for tool_call in message.tool_calls:
+        _name=tool_call["name"]
+        _args=tool_call["args"]
+        _id=tool_call["id"]
+        result=tools_by_name[_name].invoke(_args)
+        messages.append(ToolMessage(content=result,tool_call_id=_id))
+    return {"messages":messages}"""
 
+
+"""def should_continue(state:messages_agentstate):
+    last_message=state["messages"][-1]
+    if hasattr(last_message,"tool_calls") and last_message.tool_calls:
+        return "tool_call"
+    else:
+        return END"""

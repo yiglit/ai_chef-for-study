@@ -1,3 +1,44 @@
+# 环境变量与密钥
 .env
+.env.*
+!.env.example
+
+# Python 缓存与虚拟环境
+__pycache__/
+*.py[cod]
+*.egg-info/
 .venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# IDE
+.idea/
+.vscode/
+
+# 数据库与运行时产生的数据
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+/db/
+
+# 日志与本地服务状态
+*.log
+.langgraph_api/
+
+# RAG 生成的评估与解析产物
+app/RAG/resource/output/
+app/RAG/resource/datasets/
+app/RAG/resource/experiments/
+
+# 本地设计文档（沿用原有约定，不纳入仓库）
 docs/
+
+# 系统文件
+.DS_Store
+Thumbs.db
